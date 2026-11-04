@@ -1,0 +1,45 @@
+# 多阶段构建：node 构建前端产物 → python 运行镜像（内置 pytest、Allure 命令行 + JRE）
+# 构建上下文为仓库根目录，故 COPY 路径以仓库根为基准（如 web/、server/、tests/）
+# 构建命令（在 deploy 目录）：docker compose up -d --build
+
+# ---------- 阶段一：构建前端静态产物 ----------
+FROM node:20-alpine AS web-build
+WORKDIR /web
+COPY web/package*.json ./
+# 仓库不含 package-lock.json，故用 npm install（若后续提交 lock 文件可改用 npm ci）
+RUN npm install --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+# ---------- 阶段二：运行时镜像 ----------
+FROM python:3.11-slim
+
+# Allure 命令行依赖 JRE；ca-certificates 保证 HTTPS 校验
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openjdk-21-jre-headless ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG ALLURE_VERSION=2.29.0
+# Allure tgz 由宿主机预先下载到 deploy/ 目录，避免容器内访问 GitHub 失败
+COPY deploy/allure-${ALLURE_VERSION}.tgz /tmp/allure.tgz
+RUN tar -xzf /tmp/allure.tgz -C /opt \
+ && ln -s /opt/allure-${ALLURE_VERSION}/bin/allure /usr/local/bin/allure \
+ && rm -f /tmp/allure.tgz
+
+WORKDIR /app
+
+# 先装依赖以利用镜像层缓存
+COPY server/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 后端代码 + 用例代码（单镜像策略：用例随镜像发布，避免卷挂载导致版本漂移）
+COPY server/ ./server/
+COPY tests/ ./tests/
+COPY pytest.ini ./
+
+# 前端构建产物，由 FastAPI StaticFiles 托管（config.static_dir 指向 /app/static）
+COPY --from=web-build /web/dist ./static/
+
+ENV DATA_DIR=/app/data PYTHONUNBUFFERED=1
+EXPOSE 8000
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]

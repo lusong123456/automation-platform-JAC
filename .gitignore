@@ -1,0 +1,22 @@
+# —— Python ——
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# —— 前端 Node 与构建产物 ——
+node_modules/
+dist/
+static/
+
+# —— 运行时数据（SQLite、执行工作目录、报告）——
+data/
+
+# —— 部署私密配置（真实 .env 不入库）——
+deploy/.env
+deploy/.env.bak*
+
+# —— Docker 离线镜像包（大二进制，已在 release 资产里另存）——
+deploy/images-*.tar
+deploy/web-arm64-*.tar
+deploy/*arm64*.tar

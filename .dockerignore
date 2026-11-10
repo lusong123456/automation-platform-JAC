@@ -1,0 +1,17 @@
+# 构建上下文裁剪：仅保留镜像构建所需文件
+.git
+.gitignore
+.github
+data
+static
+deploy/data
+deploy/*.tar
+deploy/*.tar.gz
+web/node_modules
+web/dist
+**/__pycache__
+**/*.pyc
+.pytest_cache
+allure-results
+allure-report
+*.md

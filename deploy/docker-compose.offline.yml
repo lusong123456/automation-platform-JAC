@@ -1,0 +1,25 @@
+# 离线部署编排（镜像由 images-arm64.tar 通过 docker load 导入，无需构建）
+# 使用前：cp .env.example .env 并填写 BASE_URL、被测环境登录认证等配置
+services:
+  web:
+    image: deploy-web:arm64
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      BASE_URL: ${BASE_URL}
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx-arm64:1.27-alpine
+    ports:
+      - "18082:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data:/data:ro
+    depends_on:
+      - web
+    restart: unless-stopped

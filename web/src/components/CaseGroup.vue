@@ -1,23 +1,30 @@
 <template>
-  <el-card shadow="never" class="case-group">
-    <div class="group-header">
+  <el-card shadow="never" class="case-card">
+    <div class="card-header">
       <el-checkbox
         :model-value="allSelected"
         :indeterminate="indeterminate"
-        @change="toggleModule"
+        @change="toggleAll"
       >
-        本模块全选 · {{ module.name }}
+        {{ title }}
       </el-checkbox>
-      <span class="group-count">{{ module.cases.length }} 条</span>
+      <span class="card-count">共 {{ rows.length }} 条</span>
     </div>
-    <div class="group-body">
+    <div class="card-body">
       <el-checkbox
-        v-for="item in module.cases"
-        :key="item.id"
-        :model-value="modelValue.includes(item.id)"
-        @change="handleCaseChange(item.id, $event)"
+        v-for="row in rows"
+        :key="row.id"
+        class="case-item"
+        :model-value="modelValue.includes(row.id)"
+        @change="handleCaseChange(row.id, $event)"
       >
-        <span :title="item.id">{{ item.name }}</span>
+        <span class="case-text" :title="row.id">
+          <template v-if="showModule">
+            <span class="module-name">{{ row.module }}</span>
+            <span class="dot">·</span>
+          </template>
+          <span class="case-name">{{ row.name }}</span>
+        </span>
       </el-checkbox>
     </div>
   </el-card>
@@ -28,43 +35,42 @@ import { computed } from 'vue'
 
 import type { ModuleGroup } from '../types'
 
-const props = defineProps<{
-  module: ModuleGroup
-  modelValue: string[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    title: string
+    modules: ModuleGroup[]
+    modelValue: string[]
+    showModule?: boolean
+  }>(),
+  { showModule: true },
+)
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string[]): void
 }>()
 
-const moduleIds = computed(() => props.module.cases.map((c) => c.id))
+/** 拍平为一维，展示「模块名 · 用例名」 */
+const rows = computed(() =>
+  props.modules.flatMap((m) => m.cases.map((c) => ({ ...c, module: m.name }))),
+)
 
-const allSelected = computed(() => {
-  const ids = moduleIds.value
-  return ids.length > 0 && ids.every((id) => props.modelValue.includes(id))
-})
+const allSelected = computed(
+  () => rows.value.length > 0 && rows.value.every((r) => props.modelValue.includes(r.id)),
+)
 
-// 部分选中：有选中但未全选
 const indeterminate = computed(() => {
-  const ids = moduleIds.value
-  const selectedCount = ids.filter((id) => props.modelValue.includes(id)).length
-  return selectedCount > 0 && selectedCount < ids.length
+  const selected = rows.value.filter((r) => props.modelValue.includes(r.id)).length
+  return selected > 0 && selected < rows.value.length
 })
 
-/** 本模块全选 / 取消全选 */
-function toggleModule(checked: boolean | string | number) {
-  const ids = moduleIds.value
+/** 整卡全选 / 取消全选 */
+function toggleAll(checked: boolean | string | number) {
   const next = new Set(props.modelValue)
-  if (checked) {
-    ids.forEach((id) => next.add(id))
-  } else {
-    ids.forEach((id) => next.delete(id))
-  }
+  rows.value.forEach((r) => (checked ? next.add(r.id) : next.delete(r.id)))
   emit('update:modelValue', Array.from(next))
 }
 
-/** 单个用例勾选切换 */
-function toggleCase(id: string, checked: boolean | string | number) {
+function handleCaseChange(id: string, checked: boolean | string | number) {
   const next = new Set(props.modelValue)
   if (checked) {
     next.add(id)
@@ -73,33 +79,73 @@ function toggleCase(id: string, checked: boolean | string | number) {
   }
   emit('update:modelValue', Array.from(next))
 }
-
-/** 供模板 v-for 内使用的包装方法 */
-function handleCaseChange(id: string, checked: boolean | string | number) {
-  toggleCase(id, checked)
-}
 </script>
 
 <style scoped>
-.case-group {
-  margin-bottom: 12px;
+.case-card {
+  margin-bottom: 16px;
 }
 
-.group-header {
+.card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #ebeef5;
 }
 
-.group-count {
+.card-header :deep(.el-checkbox__label) {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.card-count {
   color: #909399;
   font-size: 13px;
 }
 
-.group-body {
+.card-body {
+  padding-top: 6px;
+}
+
+.case-item {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px 20px;
+  width: 100%;
+  height: 32px;
+  margin-right: 0;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+.case-item:hover {
+  background: #f5f7fa;
+}
+
+.case-item :deep(.el-checkbox__label) {
+  flex: 1;
+  min-width: 0;
+}
+
+.case-text {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.module-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.dot {
+  flex: none;
+  color: #c0c4cc;
+}
+
+.case-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

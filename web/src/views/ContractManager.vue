@@ -1,84 +1,76 @@
 <template>
   <div class="contract-manager">
-    <!-- 顶部卡片：上传 + AI 初稿 -->
-    <el-card shadow="never" class="block">
-      <template #header>
-        <div class="card-header">
-          <span>上传合同 / 生成初稿</span>
-        </div>
-      </template>
-      <div class="upload-zone">
-        <el-upload
-          :show-file-list="false"
-          :before-upload="onBeforeUpload"
-          :http-request="doUpload"
-          accept=".docx"
-          class="upload-btn"
-        >
-          <el-button type="primary" :loading="uploading">
-            <el-icon><Upload /></el-icon>
-            上传 .docx
-          </el-button>
-        </el-upload>
-
-        <el-upload
-          :show-file-list="false"
-          :before-upload="onBeforeUpload"
-          :http-request="doAiDraft"
-          accept=".docx"
-          class="upload-btn"
-        >
-          <el-button type="success" :loading="aiDrafting">
-            <el-icon><MagicStick /></el-icon>
-            AI 自动生成标答初稿
-          </el-button>
-        </el-upload>
-
-        <!-- 运行中：原地滚动进度链 -->
-        <div v-if="aiDrafting && aiDraftProgress.length" class="ai-progress-block">
-          <div class="ai-progress-chain">
-            <template v-for="key in ['upload','extract','commit','poll','report']" :key="key">
-              <span class="step" :class="aiStepClass(key)">
-                <span class="step-icon">{{ aiStepIcon(key) }}</span>
-                <span class="step-label">{{ AI_DRAFT_STEP_LABEL[key] || key }}</span>
-                <span v-if="aiStepElapsed(key)" class="step-elapsed">{{ aiStepElapsed(key) }}s</span>
-              </span>
-              <span v-if="key !== 'report'" class="arrow">→</span>
-            </template>
-          </div>
-          <div v-if="aiPollExtra()" class="ai-progress-extra">{{ aiPollExtra() }}</div>
-          <el-progress :percentage="aiDraftPercent()" :stroke-width="6" class="ai-progress-bar" />
-        </div>
-        <!-- 空闲：提示文字 -->
-        <el-tag v-else type="info" class="hint">
-          💡 AI 初稿：上传 docx → 跑完整审核链路 → 后端真实审核结果自动转成标答 JSON，review 后保存即可
-        </el-tag>
-      </div>
-    </el-card>
-
-    <!-- 合同列表 -->
     <el-card shadow="never" class="block">
       <template #header>
         <div class="card-header">
           <span>合同清单（{{ contracts.length }} 个）</span>
-          <el-button link type="primary" :loading="loading" @click="load">刷新</el-button>
+          <el-upload
+            :show-file-list="false"
+            :before-upload="onBeforeUpload"
+            :http-request="doUpload"
+            accept=".docx"
+          >
+            <el-button type="primary" :loading="uploading">
+              <el-icon><Upload /></el-icon>
+              上传 .docx
+            </el-button>
+          </el-upload>
         </div>
       </template>
 
-      <el-table v-loading="loading" :data="contracts" stripe size="default" empty-text="暂无合同，请先上传">
+      <!-- 生成中：原地滚动进度链 -->
+      <div v-if="aiDrafting && aiDraftProgress.length" class="ai-progress-block">
+        <div class="ai-progress-chain">
+          <template v-for="key in ['upload','extract','commit','poll','report']" :key="key">
+            <span class="step" :class="aiStepClass(key)">
+              <span class="step-icon">{{ aiStepIcon(key) }}</span>
+              <span class="step-label">{{ AI_DRAFT_STEP_LABEL[key] || key }}</span>
+              <span v-if="aiStepElapsed(key)" class="step-elapsed">{{ aiStepElapsed(key) }}s</span>
+            </span>
+            <span v-if="key !== 'report'" class="arrow">→</span>
+          </template>
+        </div>
+        <div v-if="aiPollExtra()" class="ai-progress-extra">{{ aiPollExtra() }}</div>
+        <el-progress :percentage="aiDraftPercent()" :stroke-width="6" class="ai-progress-bar" />
+      </div>
+
+      <el-table v-loading="loading" :data="contracts" stripe size="default">
+        <template #empty>
+          <div class="empty-block">
+            <div class="empty-title">暂无合同</div>
+            <div class="empty-desc">上传 Word（.docx）后即可生成标答并执行用例</div>
+            <el-upload
+              :show-file-list="false"
+              :before-upload="onBeforeUpload"
+              :http-request="doUpload"
+              accept=".docx"
+            >
+              <el-button type="primary" :loading="uploading">上传 .docx</el-button>
+            </el-upload>
+          </div>
+        </template>
         <el-table-column prop="name" label="合同名称" min-width="280" show-overflow-tooltip />
         <el-table-column prop="size_kb" label="大小" width="80">
           <template #default="{ row }">{{ row.size_kb }} KB</template>
         </el-table-column>
-        <el-table-column prop="uploaded_at" label="上传时间" width="180" />
+        <el-table-column label="上传时间" width="160">
+          <template #default="{ row }">{{ formatLocalTime(row.uploaded_at) }}</template>
+        </el-table-column>
         <el-table-column label="标答" width="110">
           <template #default="{ row }">
             <el-tag v-if="row.has_standard" type="success" size="small">已配对</el-tag>
             <el-tag v-else type="warning" size="small">未配对</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
+        <el-table-column label="操作" width="380" fixed="right">
           <template #default="{ row }">
+            <el-button
+              size="small"
+              type="success"
+              link
+              :disabled="aiDrafting"
+              @click="onAiDraft(row)"
+            >自动生成标答</el-button>
             <el-button
               v-if="!row.has_standard"
               size="small"
@@ -144,7 +136,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MagicStick, Upload } from '@element-plus/icons-vue'
+import { Upload } from '@element-plus/icons-vue'
 
 import StandardEditor from '../components/StandardEditor.vue'
 import { useAiDraft } from '../composables/useAiDraft'
@@ -160,6 +152,7 @@ import {
 } from '../api'
 import type { ContractItem, StandardGroup } from '../types'
 import type { AiDraftSSEEvent } from '../api'
+import { formatLocalTime } from '../utils/datetime'
 
 // ─── 状态 ───
 const contracts = ref<ContractItem[]>([])
@@ -317,14 +310,33 @@ watch(
   () => aiDraftState.phase,
   (phase) => {
     if (phase === 'success') void openAiDraftResult()
-    else if (phase === 'fail' && aiDraftState.error) ElMessage.error(aiDraftState.error)
+    else if (phase === 'fail') {
+      aiDraftingDrawer.value = false
+      if (aiDraftState.error) ElMessage.error(aiDraftState.error)
+    }
   },
 )
 
-async function doAiDraft({ file }: { file: File }) {
+/** 对列表中已有合同生成标答；已有标答时先确认覆盖 */
+async function onAiDraft(row: ContractItem) {
+  if (aiDrafting.value) {
+    ElMessage.warning('已有合同正在生成标答，请等待完成')
+    return
+  }
+  if (row.has_standard) {
+    try {
+      await ElMessageBox.confirm(
+        `「${row.name}」已有标答，继续生成将覆盖现有内容，是否继续？`,
+        '覆盖确认',
+        { type: 'warning' },
+      )
+    } catch {
+      return
+    }
+  }
   try {
-    await startAiDraftTask(file)
-    await load()   // 合同已在服务端落盘，立即刷新列表
+    await startAiDraftTask(row.stem)
+    ElMessage.success(`已开始生成：${row.name}`)
   } catch (e) {
     ElMessage.error((e as Error).message || 'AI 初稿启动失败')
   }
@@ -409,37 +421,20 @@ async function loadTemplate() {
   }
 }
 
+/** 抽屉内：直接对当前合同生成 AI 初稿，无需重新上传 */
 async function doAiDraftFromDrawer() {
-  const file = await pickDocxFile()
-  if (!file) return
+  if (aiDrafting.value) {
+    ElMessage.warning('已有合同正在生成标答，请等待完成')
+    return
+  }
   aiDraftingDrawer.value = true
   try {
-    await startAiDraftTask(file)
-    await load()
+    await startAiDraftTask(currentStem.value)
     // 完成后由 watch(aiDraftState.phase) 统一把结果回填到当前抽屉
   } catch (e) {
     aiDraftingDrawer.value = false
     ElMessage.error((e as Error).message || 'AI 初稿启动失败')
   }
-}
-
-/** 浏览器端选择文件 */
-function pickDocxFile(): Promise<File | null> {
-  return new Promise((resolve) => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.docx'
-    input.onchange = () => {
-      const file = input.files?.[0] || null
-      if (file && !file.name.toLowerCase().endsWith('.docx')) {
-        ElMessage.error('请选择 .docx 文件')
-        resolve(null)
-        return
-      }
-      resolve(file)
-    }
-    input.click()
-  })
 }
 
 async function onSave() {
@@ -460,7 +455,7 @@ async function onSave() {
       )
     } catch {
       // 刷新失败不影响保存本身
-      ElMessage.success('标答已保存（用例清单刷新失败，请稍后手动刷新）')
+      ElMessage.success('标答已保存（用例清单同步失败，请稍后重新进入用例清单页）')
     }
     drawerVisible.value = false
     await load()
@@ -501,22 +496,25 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
-.upload-zone {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  flex-wrap: wrap;
+.empty-block {
+  padding: 24px 0;
 }
 
-.upload-btn {
-  display: inline-block;
+.empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
 }
 
-.hint {
-  max-width: 500px;
-  line-height: 1.5;
+.empty-desc {
+  margin: 6px 0 14px;
+  font-size: 13px;
+  color: #909399;
 }
 
 .drawer-loading {
@@ -531,8 +529,7 @@ onMounted(async () => {
 
 /* AI 初稿原地进度链 */
 .ai-progress-block {
-  flex: 1 0 100%;
-  margin-top: 8px;
+  margin-bottom: 16px;
 }
 .ai-progress-chain {
   display: flex;

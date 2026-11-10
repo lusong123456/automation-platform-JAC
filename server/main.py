@@ -8,10 +8,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import db
-from server.api import accuracy, cases, contracts, health, runs
+from server.api import accuracy, auth, cases, contracts, health, runs, users
+from server.api import settings as settings_api
 from server.config import settings
 from server.core import collector
 
@@ -32,6 +34,8 @@ async def lifespan(app: FastAPI):
         logger.warning("%s 条执行记录因服务重启被标记为中断", interrupted)
 
     collector.get_cases(force=True)  # 启动时刷新清单，页面可直接展示
+    if settings.auth_enabled and not settings.auth_password:
+        logger.warning("AUTH_ENABLED=true 但未配置 AUTH_PASSWORD，登录鉴权未生效")
     logger.info("平台启动完成，data_dir=%s，base_url=%s", settings.data_dir, settings.base_url or "(未配置)")
     yield
 
@@ -48,11 +52,29 @@ async def no_cache_html(request, call_next):
     return response
 
 
+@app.middleware("http")
+async def require_login(request, call_next):
+    """除登录、探活外的 /api 请求都需要有效会话。"""
+    path = request.url.path
+    if (
+        auth.auth_active()
+        and path.startswith("/api/")
+        and request.method != "OPTIONS"
+        and path not in {"/api/auth/login", "/api/auth/me", "/api/health"}
+        and not auth.current_user(request)
+    ):
+        return JSONResponse(status_code=401, content={"detail": "未登录"})
+    return await call_next(request)
+
+
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
 app.include_router(cases.router, prefix="/api")
 app.include_router(contracts.router, prefix="/api")
 app.include_router(runs.router, prefix="/api")
 app.include_router(accuracy.router, prefix="/api")
+app.include_router(settings_api.router, prefix="/api")
+app.include_router(users.router, prefix="/api")
 
 # 报告静态目录：本地裸跑（不经 nginx）时也可直接打开报告；容器内由 nginx 直接托管该路径
 settings.reports_dir.mkdir(parents=True, exist_ok=True)

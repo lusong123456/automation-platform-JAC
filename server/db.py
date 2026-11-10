@@ -53,6 +53,14 @@ CREATE TABLE IF NOT EXISTS run_sub_steps (
     ts       TEXT NOT NULL        -- 事件时间（UTC ISO）
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,
+    display_name  TEXT,
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sub_steps_run_id ON run_sub_steps(run_id, ts DESC);
 """
@@ -192,6 +200,16 @@ def get_run(run_id: str) -> dict | None:
     return run
 
 
+def list_run_cases(run_id: str) -> list[dict]:
+    """按执行顺序返回某次执行的用例结果（报告页用）。"""
+    rows = _query(
+        "SELECT case_id, nodeid, name, module, status, message, duration_ms "
+        "FROM run_cases WHERE run_id = ? ORDER BY rowid",
+        (run_id,),
+    )
+    return [dict(r) for r in rows]
+
+
 def list_runs(limit: int, offset: int) -> tuple[int, list[dict]]:
     total = _query("SELECT COUNT(*) AS c FROM runs")[0]["c"]
     rows = _query(
@@ -286,3 +304,43 @@ def get_latest_sub_step(run_id: str) -> dict | None:
         (run_id,),
     )
     return dict(rows[0]) if rows else None
+
+
+# —— 平台用户 ——
+
+def list_users() -> list[dict]:
+    rows = _query("SELECT id, username, display_name, created_at FROM users ORDER BY id ASC")
+    return [dict(r) for r in rows]
+
+
+def get_user_by_username(username: str) -> dict | None:
+    rows = _query("SELECT * FROM users WHERE username = ?", (username,))
+    return dict(rows[0]) if rows else None
+
+
+def user_exists(username: str) -> bool:
+    return bool(_query("SELECT 1 FROM users WHERE username = ? LIMIT 1", (username,)))
+
+
+def create_user(username: str, display_name: str, password_hash: str) -> dict:
+    ts = now_iso()
+    _write(
+        "INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (username, display_name, password_hash, ts),
+    )
+    row = _query(
+        "SELECT id, username, display_name, created_at FROM users WHERE username = ?",
+        (username,),
+    )
+    return dict(row[0])
+
+
+def delete_user(user_id: int) -> bool:
+    with _write_lock:
+        conn = _connect()
+        try:
+            cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()

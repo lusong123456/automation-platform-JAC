@@ -1,11 +1,10 @@
-"""5 条 L1 E2E 核心链路用例 —— 直接跑真实后端。
+"""4 条 L1 E2E 核心链路用例 —— 直接跑真实后端。
 
 按 xlsx「自动化回归测试用例-API.xlsx」L1 / E2E-核心链路 实现：
   1. LOGIN-014  登录-获取Token-登出全流程
   2. UPLOAD-019 上传→解析→保存→删除 完整链路
   3. REVIEW-019 上传→解析→提交审核→查询任务→查看报告→反馈 完整链路
   4. CONTRAST-010 上传两份合同→智能对比→查看结果
-  5. PLATFORM-010 合同管理系统发起审核→查询状态→获取结果
 """
 
 import json
@@ -99,6 +98,39 @@ def upload_file(api: httpx.Client, file_path: Path) -> str:
     return upload_file_detail(api, file_path)["fileId"]
 
 
+# 上传响应里可能存放文件地址的字段名（实测 OBS 预签名地址在 presignedUrl/publicUrl）
+URL_KEYS = ("presignedUrl", "publicUrl", "url", "fileUrl", "docPath",
+            "contractDocPath", "originUrl", "downloadUrl", "filePath", "path")
+
+
+def find_first(obj, *keys):
+    """深度优先在响应 JSON 里递归找第一个「非空且匹配 key」的值。
+
+    被测后端响应 data 都是泛型 AjaxResult，openapi 拿不到具体结构，
+    用例对响应字段做兜底提取时用它，避免逐层手写 .get()。
+    """
+    for key in keys:
+        if isinstance(obj, dict):
+            if obj.get(key) not in (None, "", [], {}):
+                return obj[key]
+            for v in obj.values():
+                found = find_first(v, key)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = find_first(item, key)
+                if found is not None:
+                    return found
+    return None
+
+
+def find_upload_url(detail: dict):
+    """从上传响应（upload_file_detail 的返回）里提取文件地址。"""
+    url = find_first(detail, *URL_KEYS)
+    return url if isinstance(url, str) and url.strip() else None
+
+
 # ══════════════════════════════════════════════════════════════
 # 1. LOGIN-014  登录-获取Token-登出全流程
 # ══════════════════════════════════════════════════════════════
@@ -153,7 +185,7 @@ def test_login_flow(http_client: httpx.Client, api: httpx.Client):
 # 2. UPLOAD-019  上传→解析→保存→删除 完整链路
 # ══════════════════════════════════════════════════════════════
 
-@_regcase(id="UPLOAD-019", module="合同上传与文件管理", name="上传→解析→保存→删除 完整链路")
+@_regcase(id="UPLOAD-019", module="合同上传", name="上传→解析→保存→删除")
 @allure.story("E2E-核心链路")
 @allure.severity(allure.severity_level.BLOCKER)
 def test_upload_extract_save_delete(api: httpx.Client, test_file_path: Path):
@@ -216,8 +248,8 @@ def test_upload_extract_save_delete(api: httpx.Client, test_file_path: Path):
 # 3. REVIEW-019  上传→解析→提交审核→查询任务→查看报告→反馈
 # ══════════════════════════════════════════════════════════════
 
-@_regcase(id="REVIEW-019", module="合同审核-任务管理",
-          name="上传→解析→提交审核→查询任务→查看报告→反馈 完整链路")
+@_regcase(id="REVIEW-019", module="合同审核",
+          name="上传→解析→提交审核→查询任务→查看报告→反馈")
 @allure.story("E2E-核心链路")
 @allure.severity(allure.severity_level.BLOCKER)
 def test_review_full_flow(api: httpx.Client, test_file_path: Path):
@@ -302,16 +334,24 @@ def test_review_full_flow(api: httpx.Client, test_file_path: Path):
         _progress({"step": "report", "status": "done"})
 
         _progress({"step": "feedback", "status": "running"})
-        # Step6: 报告反馈（点赞/点踩）
+        # Step6: 报告反馈（openapi: ReportFeedbackRequest = reportId/documentId(int64)
+        #        + action(int32，1=点赞) + reasons/comment(string)）
+        # reportId 从上一步 report/view 响应里提取，拿不到就直接失败暴露问题
         with allure.step("POST /ai-contract/file/report/feedback — 报告反馈"):
+            report_id = find_first(j, "reportId", "documentId")
+            if report_id is None:
+                # report/view 未返回 reportId 时，用第一条审查建议的 id 兜底
+                # （反馈即针对某条审查建议点赞/点踩，itemViews[].id 即建议 id）
+                item_views = (j.get("data") or {}).get("itemViews") or []
+                report_id = item_views[0].get("id") if item_views else None
+            assert report_id is not None, \
+                f"report/view 响应中未找到 reportId/documentId/itemViews[].id，无法反馈，响应={j}"
             r = api.post("/ai-contract/file/report/feedback", json={
-                "fileId": file_id,
-                "taskId": task_id,
-                "like": True,
-                "feedback": "E2E 自动化测试反馈",
+                "reportId": report_id,
+                "action": 1,  # 1=点赞
+                "comment": "E2E 自动化测试反馈",
             })
-            # feedback 可能有自己的校验（比如 reportId 必填），不严格断言
-            allure.attach(r.text[:300], name="feedback 响应", attachment_type=allure.attachment_type.TEXT)
+            assert_ok(r, "report/feedback")
         _progress({"step": "feedback", "status": "done"})
 
     finally:
@@ -327,39 +367,40 @@ def test_review_full_flow(api: httpx.Client, test_file_path: Path):
 # 4. CONTRAST-010  上传两份合同→智能对比→查看结果
 # ══════════════════════════════════════════════════════════════
 
-@_regcase(id="CONTRAST-010", module="合同对比与合同类型", name="上传两份合同→智能对比→查看结果")
+@_regcase(id="CONTRAST-010", module="合同对比", name="上传两份合同→智能对比→查看结果")
 @allure.story("E2E-核心链路")
 @allure.severity(allure.severity_level.NORMAL)
 def test_contract_compare(api: httpx.Client, test_file_path: Path):
     """
-    链路：upload(基准) → upload(对比) → POST /contract/compare → 查看差异
-    注意：只准备了一份测试文件时，用同一份做两次 upload 即可（路径不同即可）。
+    链路：upload(基准) → upload(对比) → POST /contract/compare → 校验对比结果
+    接口定义（openapi.json）：CompareRequest = {source: {originUrl, name},
+    target: {originUrl, name}}，传的是文件地址不是 fileId。
+    注意：只准备了一份测试文件时，用同一份做两次 upload 即可。
     """
     file_a = None
     file_b = None
     try:
         _progress({"step": "upload", "status": "running"})
-        file_a = upload_file(api, test_file_path)
-        file_b = upload_file(api, test_file_path)  # 同文件不同 fileId
+        detail_a = upload_file_detail(api, test_file_path)
+        file_a = detail_a["fileId"]
+        detail_b = upload_file_detail(api, test_file_path)  # 同文件不同 fileId
+        file_b = detail_b["fileId"]
         _progress({"step": "upload", "status": "done"})
 
         _progress({"step": "compare", "status": "running"})
         with allure.step("POST /ai-contract/contract/compare — 发起智能对比"):
+            url_a = find_upload_url(detail_a)
+            url_b = find_upload_url(detail_b)
+            assert url_a and url_b, \
+                f"上传响应中未找到文件地址字段（{URL_KEYS}），无法发起对比：a={detail_a} b={detail_b}"
             r = api.post("/ai-contract/contract/compare", json={
-                "baseFileId": file_a,
-                "compareFileId": file_b,
+                "source": {"originUrl": url_a, "name": test_file_path.name},
+                "target": {"originUrl": url_b, "name": test_file_path.name},
             })
-            if r.status_code == 200:
-                j = r.json()
-                if j.get("code") == 200:
-                    allure.attach(f"对比成功: {json.dumps(j, ensure_ascii=False)[:500]}",
-                                  name="compare 响应", attachment_type=allure.attachment_type.TEXT)
-                else:
-                    allure.attach(f"对比返回 code≠200: {j}",
-                                  name="compare 非成功", attachment_type=allure.attachment_type.TEXT)
-            else:
-                allure.attach(f"HTTP {r.status_code}: {r.text[:300]}",
-                              name="compare 异常", attachment_type=allure.attachment_type.TEXT)
+            j = assert_ok(r, "智能对比")
+            allure.attach(json.dumps(j, ensure_ascii=False)[:800],
+                          name="compare 响应", attachment_type=allure.attachment_type.TEXT)
+            assert j.get("data") is not None, "智能对比应返回结果数据"
         _progress({"step": "compare", "status": "done"})
     finally:
         for fid in [file_a, file_b]:
@@ -368,48 +409,3 @@ def test_contract_compare(api: httpx.Client, test_file_path: Path):
                     api.post("/ai-contract/file/delete", params={"fileId": fid})
                 except Exception:
                     pass
-
-
-# ══════════════════════════════════════════════════════════════
-# 5. PLATFORM-010  合同管理系统发起审核→查询状态→获取结果
-# ══════════════════════════════════════════════════════════════
-
-@_regcase(id="PLATFORM-010", module="外部平台对接",
-          name="合同管理系统发起审核→查询状态→获取结果")
-@allure.story("E2E-核心链路")
-@allure.severity(allure.severity_level.NORMAL)
-def test_platform_htglxt_review(api: httpx.Client):
-    """
-    链路：POST /platform/htglxt/aiReview → (轮询) GET /platform/htglxt/taskStatus → GET /platform/htglxt/reviewStatus
-    注意：这里复用客户端凭证换取的业务 Token。
-    """
-    _progress({"step": "platform_review", "status": "running"})
-    # Step1: 发起平台审核
-    with allure.step("POST /ai-contract/platform/htglxt/aiReview — 发起审核"):
-        r = api.post("/ai-contract/platform/htglxt/aiReview", json={
-            "contractName": "E2E自动化测试合同",
-            # 其他字段按接口定义补，先用空 body 探活
-        })
-        allure.attach(f"HTTP {r.status_code}: {r.text[:500]}",
-                      name="aiReview 响应", attachment_type=allure.attachment_type.TEXT)
-        review_id = None
-        if r.status_code == 200:
-            j = r.json()
-            review_id = first_id(j)
-    _progress({"step": "platform_review", "status": "done"})
-
-    _progress({"step": "platform_task_status", "status": "running"})
-    # Step2: 查询状态
-    with allure.step("GET /ai-contract/platform/htglxt/taskStatus — 查询任务状态"):
-        r = api.get("/ai-contract/platform/htglxt/taskStatus")
-        allure.attach(f"HTTP {r.status_code}: {r.text[:300]}",
-                      name="taskStatus 响应", attachment_type=allure.attachment_type.TEXT)
-    _progress({"step": "platform_task_status", "status": "done"})
-
-    _progress({"step": "platform_review_detail", "status": "running"})
-    # Step3: 获取审核详情
-    with allure.step("GET /ai-contract/platform/htglxt/reviewStatus — 获取审核详情"):
-        r = api.get("/ai-contract/platform/htglxt/reviewStatus")
-        allure.attach(f"HTTP {r.status_code}: {r.text[:300]}",
-                      name="reviewStatus 响应", attachment_type=allure.attachment_type.TEXT)
-    _progress({"step": "platform_review_detail", "status": "done"})

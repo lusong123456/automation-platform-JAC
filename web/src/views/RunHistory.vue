@@ -1,6 +1,12 @@
 <template>
   <div class="run-history">
     <el-card shadow="never">
+      <template #header>
+        <div class="card-header">
+          <span>执行记录</span>
+          <span class="header-meta">共 {{ total }} 次</span>
+        </div>
+      </template>
       <el-table v-loading="loading" :data="items" border stripe>
         <el-table-column label="开始时间" min-width="170">
           <template #default="{ row }">{{ formatLocalTime(row.started_at) }}</template>
@@ -17,19 +23,11 @@
         <el-table-column prop="case_passed" label="通过" width="80" align="center" />
         <el-table-column prop="case_failed" label="失败" width="80" align="center" />
         <el-table-column label="耗时" width="110" align="center">
-          <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
+          <template #default="{ row }">{{ formatDurationText(row.duration_ms) }}</template>
         </el-table-column>
-        <el-table-column label="报告" width="140">
+        <el-table-column label="操作" width="120">
           <template #default="{ row }">
-            <el-link
-              v-if="row.report_ready && row.report_url"
-              type="primary"
-              :underline="false"
-              @click="openReport(row)"
-            >
-              查看报告
-            </el-link>
-            <span v-else class="muted">报告已清理</span>
+            <el-button link type="primary" @click="openRunReport(row)">查看报告</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -51,11 +49,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 
 import { listRuns } from '../api'
-import { formatLocalTime } from '../utils/datetime'
+import { formatDurationText, formatLocalTime } from '../utils/datetime'
 import type { RunListItem, RunStatus } from '../types'
 
+const router = useRouter()
 const limit = 20
 const page = ref(1)
 const total = ref(0)
@@ -90,26 +90,28 @@ async function load() {
   }
 }
 
-/** 毫秒转秒展示 */
-function formatDuration(ms: number | null): string {
-  if (ms === null || ms === undefined) return '—'
-  return `${(ms / 1000).toFixed(1)} 秒`
-}
-
-/** 新标签页打开报告（相对路径） */
-function openReport(row: RunListItem) {
-  if (row.report_url) {
-    window.open(row.report_url, '_blank')
-  }
+/** 跳转平台内的人类可读报告页 */
+function openRunReport(row: RunListItem) {
+  router.push({ name: 'run-report', params: { runId: row.run_id } })
 }
 
 onMounted(load)
 </script>
 
 <style scoped>
-.muted {
-  color: #909399;
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.header-meta {
   font-size: 13px;
+  font-weight: 400;
+  color: #909399;
 }
 
 .pagination {

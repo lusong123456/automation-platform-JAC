@@ -10,6 +10,7 @@ export interface CaseItem {
 /** 按模块分组的用例集合 */
 export interface ModuleGroup {
   name: string
+  category: 'flow' | 'contract'
   cases: CaseItem[]
 }
 
@@ -56,6 +57,39 @@ export interface RunDetail extends RunListItem {
   failed_cases: FailedCase[]
   /** 子步骤实时事件（SSE 推送） */
   sub_steps?: SubStepEvent[]
+}
+
+/** 报告页的单条用例结果 */
+export interface ReportCase {
+  case_id: string
+  nodeid: string
+  name: string
+  module: string
+  category: 'flow' | 'contract'
+  status: string
+  message: string
+  duration_ms: number
+}
+
+/** 报告页按模块分组的用例统计 */
+export interface ReportModule {
+  name: string
+  category: 'flow' | 'contract'
+  /** flow：IT 流程；contract：合同功能；accuracy：审核正确性 */
+  kind: 'flow' | 'contract' | 'accuracy'
+  total: number
+  passed: number
+  failed: number
+  skipped: number
+  cases: ReportCase[]
+}
+
+/** GET /api/runs/{run_id}/report-data 响应 */
+export interface RunReportData {
+  run: RunListItem
+  cases: ReportCase[]
+  modules: ReportModule[]
+  accuracy: AccuracyRunDetail | null
 }
 
 /** 子步骤进度事件（来自 /api/runs/{id}/stream SSE 或 /api/runs/active） */
@@ -183,11 +217,6 @@ export interface AccuracyRunDetail extends AccuracyRunSummary {
   accuracy_data: AccuracyContract[]
 }
 
-export interface AccuracyRunsResponse {
-  total: number
-  items: AccuracyRunSummary[]
-}
-
 // ──────────────────────────────────────────────────────────
 // 合同-标答管理相关类型
 // ──────────────────────────────────────────────────────────
@@ -245,4 +274,55 @@ export interface AiDraftResponse {
   total_groups: number
   total_issues: number
   note: string
+}
+
+// ──────────────────────────────────────────────────────────
+// 系统设置相关类型
+// ──────────────────────────────────────────────────────────
+
+export type SettingsValueType = 'string' | 'int' | 'float' | 'bool' | 'password' | 'select'
+
+export interface SettingsChoice {
+  label: string
+  value: string
+}
+
+/** 单个配置项；敏感项 value 恒为空，只返回 configured */
+export interface SettingsItem {
+  key: string
+  group: string
+  label: string
+  type: SettingsValueType
+  value: string | number | boolean
+  help: string
+  configured?: boolean
+  readonly?: boolean
+  /** 只读密码项为 true 时明文展示（用于平台登录密码） */
+  plain?: boolean
+  /** 与上一项合并到同一行展示（仅占位，不单独渲染） */
+  merged?: boolean
+  choices?: SettingsChoice[]
+  min?: number
+  max?: number
+}
+
+export interface SettingsResponse {
+  items: SettingsItem[]
+}
+
+/** 平台用户（设置页用户管理） */
+export interface ManagedUser {
+  id: number
+  username: string
+  display_name: string
+  created_at: string
+}
+
+export interface UsersResponse {
+  items: ManagedUser[]
+}
+
+export interface SettingsUpdateResult {
+  saved: string[]
+  logout_required: boolean
 }

@@ -40,7 +40,7 @@
       <div class="rp-stats">
         <span class="pass">通过 {{ run.case_passed }}</span>
         <span class="fail">失败 {{ run.case_failed }}</span>
-        <span v-if="run.duration_ms !== null" class="muted">耗时 {{ (run.duration_ms / 1000).toFixed(1) }} 秒</span>
+        <span v-if="run.duration_ms !== null" class="muted">耗时 {{ formatDurationText(run.duration_ms) }}</span>
         <span v-if="run.triggered_by" class="muted">操作人 {{ run.triggered_by }}</span>
       </div>
 
@@ -89,6 +89,7 @@
 import { computed } from 'vue'
 
 import type { RunDetail, RunStatus, SubStepEvent } from '../types'
+import { formatDurationText } from '../utils/datetime'
 
 const props = defineProps<{
   run: RunDetail

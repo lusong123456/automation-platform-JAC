@@ -4,10 +4,10 @@
 2) `CASE_MANIFEST_FILE` 环境变量：收集时由平台注入，本文件写入清单；
 3) `RUN_RESULT_FILE` 环境变量：执行时由平台注入，本文件写入用例级结果。
 
-登录策略：
-  客户端凭证 — POST /ai-contract/platform/auth/token（appId/appSecret/employeeId）
-  换取业务 Token，按 TTL 提前续期；对外部系统开放，是自动化测试唯一路径。
-  未配置客户端凭证时 skip 需要鉴权的用例。
+登录策略（AUTH_MODE）：
+  账号密码   — POST /login（username/password）换取业务 Token；
+  客户端凭证 — POST /ai-contract/platform/auth/token（appId/appSecret/employeeId）。
+  两种方式都按 TTL 提前续期；未配置对应凭证时 skip 需要鉴权的用例。
 """
 
 import json
@@ -84,10 +84,13 @@ UPLOAD_TIMEOUT = float(os.getenv("UPLOAD_TIMEOUT", "180"))
 # 关闭 keep-alive，让每个请求新建连接，代价只有一次局域网握手
 HTTP_LIMITS = httpx.Limits(max_keepalive_connections=0)
 
-# ── 客户端凭证与 Token 续期 ──────────────────────────────────────
-# 被测系统对外部系统开放 /ai-contract/platform/auth/token（客户端凭证），
-# 用 appId/appSecret/employeeId 换取业务 Token，可程序化续期，无需浏览器。
+# ── 认证方式与 Token 续期 ────────────────────────────────────────
+# password：POST /login，只需账号密码；
+# client_credentials：POST /ai-contract/platform/auth/token，用 appId/appSecret/employeeId 换取 Token。
 
+AUTH_MODE = os.getenv("AUTH_MODE", "client_credentials").strip().lower()
+TEST_USERNAME = os.getenv("TEST_USERNAME", "").strip()
+TEST_PASSWORD = os.getenv("TEST_PASSWORD", "").strip()
 APP_ID = os.getenv("APP_ID", "").strip()
 APP_SECRET = os.getenv("APP_SECRET", "").strip()
 APP_EMPLOYEE_ID = os.getenv("APP_EMPLOYEE_ID", "").strip()
@@ -96,7 +99,7 @@ TOKEN_REFRESH_AHEAD = float(os.getenv("TOKEN_REFRESH_AHEAD", "300"))
 
 
 class TokenManager:
-    """客户端凭证换取 Token，并按 TTL 提前续期。
+    """按认证方式换取 Token，并按 TTL 提前续期。
 
     必须是模块级单例：鉴权失效重试发生在请求执行期间（auth_flow 内），
     那时取不到 fixture，只能引用模块级对象。
@@ -108,19 +111,27 @@ class TokenManager:
         self._lock = threading.Lock()
 
     def _fetch(self) -> str:
-        if not (APP_ID and APP_SECRET and APP_EMPLOYEE_ID):
-            raise RuntimeError("未配置客户端凭证（APP_ID / APP_SECRET / APP_EMPLOYEE_ID）")
-
         with httpx.Client(base_url=BASE_URL, timeout=HTTP_TIMEOUT, verify=False) as c:
-            r = c.post("/ai-contract/platform/auth/token", json={
-                "appId": APP_ID,
-                "appSecret": APP_SECRET,
-                "employeeId": APP_EMPLOYEE_ID,
-            })
-            j = r.json()
-        token = (j.get("data") or {}).get("token")
+            if AUTH_MODE == "password":
+                if not (TEST_USERNAME and TEST_PASSWORD):
+                    raise RuntimeError("未配置被测系统账号密码（TEST_USERNAME / TEST_PASSWORD）")
+                r = c.post("/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
+                j = r.json()
+                token = j.get("token") or (j.get("data") or {}).get("token")
+                fail_msg = j.get("msg") or "账号密码登录失败"
+            else:
+                if not (APP_ID and APP_SECRET and APP_EMPLOYEE_ID):
+                    raise RuntimeError("未配置客户端凭证（APP_ID / APP_SECRET / APP_EMPLOYEE_ID）")
+                r = c.post("/ai-contract/platform/auth/token", json={
+                    "appId": APP_ID,
+                    "appSecret": APP_SECRET,
+                    "employeeId": APP_EMPLOYEE_ID,
+                })
+                j = r.json()
+                token = (j.get("data") or {}).get("token")
+                fail_msg = j.get("msg") or "客户端凭证换取 Token 失败"
         if j.get("code") != 200 or not token:
-            raise RuntimeError(f"客户端凭证换取 Token 失败: {j.get('msg')}")
+            raise RuntimeError(fail_msg)
         return token
 
     def get(self, force: bool = False) -> str:
@@ -285,10 +296,10 @@ def http_client(base_url: str) -> httpx.Client:
 
 @pytest.fixture(scope="session")
 def token() -> str:
-    """登录凭证 fixture —— 用客户端凭证换取的 Token（Bearer 形式）。"""
+    """登录凭证 fixture —— 按 AUTH_MODE 换取的业务 Token（Bearer 形式）。"""
     try:
         t = token_manager.get()
-        print("\n  [conftest] Token 就绪（客户端凭证换取）")
+        print(f"\n  [conftest] Token 就绪（{AUTH_MODE}）")
         return "Bearer " + t
     except Exception as e:
         pytest.skip(f"无法获取 Token：{e}")

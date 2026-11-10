@@ -94,9 +94,9 @@ async function follow() {
   }
 }
 
-async function start(file: File): Promise<void> {
+async function start(contract: string): Promise<void> {
   reset()
-  const info = await startAiDraft(file)
+  const info = await startAiDraft(contract)
   state.taskId = info.task_id
   state.contractName = info.contract_name
   state.stem = info.stem

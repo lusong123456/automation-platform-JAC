@@ -160,7 +160,7 @@ def _execute(run_id: str, selected: list[dict], index: dict[str, dict]) -> None:
 
     try:
         if not settings.base_url:
-            raise RuntimeError("未配置被测环境地址 BASE_URL，请在 deploy/.env 中配置后重试")
+            raise RuntimeError("未配置被测环境地址，请在系统设置页填写后重试")
 
         name_by_nodeid = {c["nodeid"]: c["name"] for c in selected}
 
@@ -176,6 +176,12 @@ def _execute(run_id: str, selected: list[dict], index: dict[str, dict]) -> None:
         env.update({
             "BASE_URL": settings.base_url,
             "HTTP_TIMEOUT": str(settings.http_timeout),
+            "AUTH_MODE": settings.auth_mode,
+            "TEST_USERNAME": settings.test_username,
+            "TEST_PASSWORD": settings.test_password,
+            "APP_ID": settings.app_id,
+            "APP_SECRET": settings.app_secret,
+            "APP_EMPLOYEE_ID": settings.app_employee_id,
             "RUN_RESULT_FILE": str(results_file),
             "RUN_PROGRESS_FILE": str(progress_path),
             "ACCURACY_DIFF_FILE": str(workdir / "accuracy_diff.json"),
@@ -188,6 +194,8 @@ def _execute(run_id: str, selected: list[dict], index: dict[str, dict]) -> None:
             "LLM_TIMEOUT": str(settings.llm_timeout),
             "AI_JUDGE_SCOPE": settings.ai_judge_scope,
             "SUGGESTION_OVERLAP_THRESHOLD": str(settings.suggestion_overlap_threshold),
+            "ACC_GROUP_MATCH": "true" if settings.acc_group_match else "false",
+            "ACC_PAIR_THRESHOLD": str(settings.acc_pair_threshold),
             "NO_COLOR": "1",
         })
 

@@ -2,18 +2,21 @@
 import axios from 'axios'
 
 import type {
-  AccuracyRunsResponse,
-  AccuracyRunDetail,
   AiDraftResponse,
   CasesResponse,
   ContractItem,
   ContractsResponse,
+  ManagedUser,
   RunCreateResponse,
   RunDetail,
+  RunReportData,
   RunsResponse,
+  SettingsResponse,
+  SettingsUpdateResult,
   StandardGroup,
   StandardResponse,
   TemplateResponse,
+  UsersResponse,
 } from '../types'
 
 /** 带业务 code 的错误；409 场景额外携带 run_id */
@@ -32,6 +35,7 @@ export class ApiError extends Error {
 const http = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  withCredentials: true, // 会话 cookie 随请求发送
 })
 
 // 统一把后端错误转换为带中文 message 的 ApiError
@@ -39,6 +43,10 @@ http.interceptors.response.use(
   (response) => response,
   (error) => {
     const response = error?.response
+    // 会话失效：跳登录页（登录与查询自身接口除外）
+    if (response?.status === 401 && !String(error?.config?.url || '').startsWith('/auth/')) {
+      window.location.hash = '#/login'
+    }
     const data = response?.data
     if (data && typeof data === 'object') {
       // 兼容两类后端错误结构：
@@ -54,6 +62,60 @@ http.interceptors.response.use(
     return Promise.reject(new ApiError('网络异常，无法连接后端服务', 'NETWORK_ERROR'))
   },
 )
+
+// ──────────────────── 登录鉴权（Auth） ────────────────────
+
+export interface AuthUser {
+  username: string
+  auth_enabled: boolean
+}
+
+export async function login(username: string, password: string): Promise<AuthUser> {
+  const { data } = await http.post<AuthUser>('/auth/login', { username, password })
+  return data
+}
+
+export async function logout(): Promise<void> {
+  await http.post('/auth/logout')
+}
+
+export async function getMe(): Promise<AuthUser> {
+  const { data } = await http.get<AuthUser>('/auth/me')
+  return data
+}
+
+/** 读取系统配置（敏感项脱敏） */
+export async function getSettings(): Promise<SettingsResponse> {
+  const { data } = await http.get<SettingsResponse>('/settings')
+  return data
+}
+
+/** 保存系统配置（稀疏提交，只传改动项） */
+export async function updateSettings(values: Record<string, unknown>): Promise<SettingsUpdateResult> {
+  const { data } = await http.put<SettingsUpdateResult>('/settings', values)
+  return data
+}
+
+/** 平台用户列表 */
+export async function listUsers(): Promise<ManagedUser[]> {
+  const { data } = await http.get<UsersResponse>('/users')
+  return data.items
+}
+
+/** 新增平台用户 */
+export async function createUser(payload: {
+  username: string
+  password: string
+  display_name?: string
+}): Promise<ManagedUser> {
+  const { data } = await http.post<ManagedUser>('/users', payload)
+  return data
+}
+
+/** 删除平台用户 */
+export async function deleteUser(id: number): Promise<void> {
+  await http.delete(`/users/${id}`)
+}
 
 /** 获取用例清单（按模块分组） */
 export async function getCases(): Promise<CasesResponse> {
@@ -85,17 +147,18 @@ export async function listRuns(limit = 20, offset = 0): Promise<RunsResponse> {
   return data
 }
 
-// ──────────────────── 审核正确性（Accuracy） ────────────────────
-
-/** 列出所有有审核正确性详情的执行 */
-export async function listAccuracyRuns(limit = 20): Promise<AccuracyRunsResponse> {
-  const { data } = await http.get<AccuracyRunsResponse>('/accuracy/runs', { params: { limit } })
+/** 报告页数据：执行摘要 + 用例明细 + 审核正确性详情 */
+export async function getRunReport(run_id: string): Promise<RunReportData> {
+  const { data } = await http.get<RunReportData>(`/runs/${encodeURIComponent(run_id)}/report-data`)
   return data
 }
 
-/** 获取单条 accuracy 执行的完整 diff 详情 */
-export async function getAccuracyDetail(run_id: string): Promise<AccuracyRunDetail> {
-  const { data } = await http.get<AccuracyRunDetail>(`/accuracy/runs/${encodeURIComponent(run_id)}`)
+/** 本次执行的 pytest 日志文本 */
+export async function getRunLog(run_id: string): Promise<string> {
+  const { data } = await http.get<string>(`/runs/${encodeURIComponent(run_id)}/log`, {
+    responseType: 'text',
+    transformResponse: [(value) => value],
+  })
   return data
 }
 
@@ -141,11 +204,10 @@ export interface AiDraftTaskInfo {
   created_at: number
 }
 
-export async function startAiDraft(file: File): Promise<{ task_id: string; contract_name: string; stem: string }> {
-  const form = new FormData()
-  form.append('file', file)
+/** 对已上传的合同生成 AI 初稿（同合同已有任务时服务端复用） */
+export async function startAiDraft(contract: string): Promise<{ task_id: string; contract_name: string; stem: string }> {
   const { data } = await http.post<{ task_id: string; contract_name: string; stem: string }>(
-    '/contracts/ai-draft/start', form, { headers: { 'Content-Type': 'multipart/form-data' } },
+    `/contracts/${encodeURIComponent(contract)}/ai-draft/start`,
   )
   return data
 }
@@ -166,9 +228,6 @@ export async function streamAiDraft(
   const resp = await fetch(`/api/contracts/ai-draft/${taskId}/stream?offset=${offset}`, {
     credentials: 'include',
     signal: opts?.signal,
-    headers: {
-      ...(localStorage.getItem('token') ? { Authorization: 'Bearer ' + localStorage.getItem('token') } : {}),
-    },
   })
   if (!resp.ok || !resp.body) {
     throw new Error(`订阅进度失败 ${resp.status}`)

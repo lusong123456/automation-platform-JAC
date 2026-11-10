@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import unicodedata
@@ -49,14 +50,16 @@ def _ensure_dirs() -> None:
 def _sanitize_filename(raw: str) -> str:
     """把任意输入清洗成安全的文件名。"""
     # 1. 去除路径分隔符
-    name = raw.replace("/", "").replace("\\", "").replace("..", "")
-    # 2. Unicode 全角转半角
+    name = raw.replace("/", "").replace("\\", "")
+    # 2. Unicode 全角转半角（全角点会变成英文点，必须在折叠连续点之前完成）
     name = unicodedata.normalize("NFKC", name)
-    # 3. 非法字符替换
+    # 3. 折叠连续点：避免扩展名前残留 ".." 导致 stem 带点（如 合同A..docx）
+    name = re.sub(r"\.{2,}", ".", name)
+    # 4. 非法字符替换
     name = _SAFE_FILENAME_RE.sub("_", name).strip("._-")
     if not name:
         name = "contract"
-    # 4. 限制长度
+    # 5. 限制长度
     if len(name) > 120:
         stem, ext = (name.rsplit(".", 1) + ["docx"])[:2]
         name = stem[:100] + "." + ext
@@ -98,6 +101,7 @@ def _list_pairs() -> list[dict]:
             "stem": f.stem,
             "size_kb": max(1, stat.st_size // 1024),
             "uploaded_at": _mtime_iso(stat.st_mtime),
+            "_mtime": stat.st_mtime,
         }
 
     standards = {}
@@ -105,10 +109,14 @@ def _list_pairs() -> list[dict]:
         standards[f.stem] = f.name
 
     pairs = []
-    for stem, c in sorted(contracts.items(), key=lambda x: x[1]["name"]):
+    # 新增合同排在最前：按上传（文件修改）时间倒序
+    for stem, c in sorted(contracts.items(), key=lambda x: x[1]["_mtime"], reverse=True):
         sname = standards.get(stem)
         pairs.append({
-            **c,
+            "name": c["name"],
+            "stem": c["stem"],
+            "size_kb": c["size_kb"],
+            "uploaded_at": c["uploaded_at"],
             "has_standard": sname is not None,
             "standard_name": sname,
         })
@@ -121,12 +129,15 @@ def _mtime_iso(ts: float) -> str:
 
 
 def _stem_from_name(name: str) -> str:
-    """从 URL 参数里的文件名提取 stem（兼容 docx 或 json 后缀）。"""
-    base = Path(name).stem
-    # 如果 name 本身没后缀但带了 .docx 或 .json 字样也能提取
+    """从 URL 参数里提取 stem（兼容带 docx/json 后缀的文件名和不带后缀的 stem）。
+
+    前端传参通常是已经去掉后缀的 stem，本身可能含点（如 合同.v1）。
+    只有在确实以 .docx/.json 结尾时才剥离后缀，不能无条件用 Path.stem，
+    否则 合同.v1 会被误截成 合同，导致标答写到别的合同上。
+    """
     if name.lower().endswith(".docx") or name.lower().endswith(".json"):
-        base = name.rsplit(".", 1)[0]
-    return base
+        return name.rsplit(".", 1)[0]
+    return name
 
 
 # ──────────────────────────────────────────────────────────
@@ -592,26 +603,24 @@ def _run_ai_draft(task_id: str, contract_path: Path, safe_name: str, base_url: s
         _ai_append(task_id, {"status": "fail", "desc": f"任务异常：{ex}"})
     finally:
         _ai_finish_unexpected(task_id)
+        with _AI_DRAFT_LOCK:
+            task = _AI_DRAFT_TASKS.get(task_id)
+            temp_file = task.pop("temp_file", "") if task else ""
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
 
 
-@router.post("/contracts/ai-draft/start")
-async def start_ai_draft(file: UploadFile) -> dict:
-    """创建 AI 初稿任务：立即落盘合同并返回 task_id，任务在服务端后台继续跑。
+@router.post("/contracts/{name}/ai-draft/start")
+def start_ai_draft(name: str) -> dict:
+    """对已上传的合同触发 AI 初稿。
 
-    页面切换只断开 SSE 连接，任务不受影响；回来用 task_id 恢复进度与结果。
+    同一合同已有运行中任务时直接复用，避免重复消耗审核资源。
     """
-    if not file.filename or not file.filename.lower().endswith(".docx"):
-        raise HTTPException(status_code=400, detail="仅支持 .docx 文件")
-    data = await file.read()
-    if not _check_docx_magic(data[:8]):
-        raise HTTPException(status_code=400, detail="文件格式异常（不是合法的 docx）")
-
     _ensure_dirs()
-    safe_name = _sanitize_filename(file.filename)
-    if not safe_name.lower().endswith(".docx"):
-        safe_name += ".docx"
+    safe_name = f"{_stem_from_name(name)}.docx"
     contract_path = CONTRACTS_DIR / safe_name
-    contract_path.write_bytes(data)
+    if not contract_path.exists():
+        raise HTTPException(status_code=404, detail="合同不存在，请先上传")
 
     base_url = settings.base_url.rstrip("/")
     if not base_url:
@@ -619,26 +628,37 @@ async def start_ai_draft(file: UploadFile) -> dict:
     if ":11000" in base_url and "/prod-api" not in base_url:
         base_url += "/prod-api"
 
+    stem = _stem_from_name(safe_name)
     _purge_ai_draft_tasks()
-    task_id = uuid.uuid4().hex[:16]
-    now = time.time()
     with _AI_DRAFT_LOCK:
+        for running_id, task in _AI_DRAFT_TASKS.items():
+            if task["status"] == "running" and task["stem"] == stem:
+                return _ai_snapshot(running_id, task)
+
+        task_id = uuid.uuid4().hex[:16]
+        now = time.time()
+        # 用临时副本跑任务：生成过程中删除/覆盖合同不影响后台线程
+        temp_dir = settings.runs_dir / "ai-draft"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / f"{task_id}.docx"
+        shutil.copy2(contract_path, temp_path)
         _AI_DRAFT_TASKS[task_id] = {
             "contract_name": safe_name,
-            "stem": _stem_from_name(safe_name),
+            "stem": stem,
             "status": "running",
             "events": [],
             "result": None,
             "error": "",
+            "temp_file": str(temp_path),
             "created_at": now,
             "updated_at": now,
         }
     threading.Thread(
         target=_run_ai_draft,
-        args=(task_id, contract_path, safe_name, base_url),
+        args=(task_id, temp_path, safe_name, base_url),
         daemon=True,
     ).start()
-    return {"task_id": task_id, "contract_name": safe_name, "stem": _stem_from_name(safe_name)}
+    return {"task_id": task_id, "contract_name": safe_name, "stem": stem}
 
 
 @router.get("/contracts/ai-draft/active")

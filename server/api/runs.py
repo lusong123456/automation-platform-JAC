@@ -7,10 +7,11 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Query
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 
 from server import db
+from server.api.auth import current_user
 from server.config import settings
 from server.core import collector, runner
 from server.core.runner import InvalidCases, RunInProgress
@@ -42,8 +43,14 @@ def _to_api(run: dict) -> dict:
 
 
 @router.post("/runs")
-def create_run(payload: RunCreateRequest):
-    triggered_by = (payload.triggered_by or settings.operator_default or "未填写").strip()
+def create_run(payload: RunCreateRequest, request: Request):
+    # 操作人留空时默认记为当前登录用户
+    triggered_by = (
+        (payload.triggered_by or "").strip()
+        or current_user(request)
+        or settings.operator_default
+        or "未填写"
+    )
     try:
         run = runner.start_run(payload.case_ids, triggered_by)
     except InvalidCases as exc:
@@ -92,6 +99,93 @@ def get_run(run_id: str):
             content={"code": "RUN_NOT_FOUND", "message": "执行记录不存在"},
         )
     return _to_api(run)
+
+
+def _group_cases(cases: list[dict]) -> list[dict]:
+    """按模块分组并统计通过/失败/跳过，保持执行顺序。
+
+    kind: flow（IT 流程）/ contract（合同功能）/ accuracy（审核正确性）
+    """
+    contract_feature_modules = {"合同上传", "合同审核", "合同对比"}
+    groups: list[dict] = []
+    index: dict[str, dict] = {}
+    for case in cases:
+        name = case["module"]
+        group = index.get(name)
+        if group is None:
+            if case.get("category") == "contract":
+                kind = "accuracy"
+            elif name in contract_feature_modules:
+                kind = "contract"
+            else:
+                kind = "flow"
+            group = {
+                "name": name,
+                "category": case.get("category", "flow"),
+                "kind": kind,
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "cases": [],
+            }
+            index[name] = group
+            groups.append(group)
+        group["total"] += 1
+        status = case.get("status") or ""
+        if status == "passed":
+            group["passed"] += 1
+        elif status in ("failed", "error"):
+            group["failed"] += 1
+        elif status == "skipped":
+            group["skipped"] += 1
+        group["cases"].append(case)
+    return groups
+
+
+@router.get("/runs/{run_id}/report-data")
+def get_report_data(run_id: str):
+    """报告页数据：执行摘要 + 用例明细（按模块分组）+ 审核正确性详情。"""
+    run = db.get_run(run_id)
+    if not run:
+        return JSONResponse(
+            status_code=404, content={"code": "RUN_NOT_FOUND", "message": "执行记录不存在"}
+        )
+    cases = db.list_run_cases(run_id)
+    for case in cases:
+        raw = case.get("module") or ""
+        case["category"] = collector.module_category(raw)
+        case["module"] = collector.module_display(raw)
+    accuracy = db.get_accuracy_detail(run_id)
+    if accuracy and not accuracy.get("accuracy_data"):
+        accuracy = None
+    return {
+        "run": _to_api(run),
+        "cases": cases,
+        "modules": _group_cases(cases),
+        "accuracy": accuracy,
+    }
+
+
+@router.get("/runs/{run_id}/log")
+def get_run_log(run_id: str):
+    """返回本次执行的 pytest 日志（超过 40 万字符时只保留尾部）。"""
+    run = db.get_run(run_id)
+    if not run:
+        return JSONResponse(
+            status_code=404, content={"code": "RUN_NOT_FOUND", "message": "执行记录不存在"}
+        )
+    log_path = settings.runs_dir / run_id / "pytest.log"
+    if not log_path.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"code": "LOG_NOT_FOUND", "message": "该执行的日志不存在"},
+        )
+    text = log_path.read_text(encoding="utf-8", errors="replace")
+    limit = 400_000
+    if len(text) > limit:
+        text = "……（日志过长，仅显示末尾部分）\n" + text[-limit:]
+    return PlainTextResponse(text)
 
 
 @router.get("/runs/{run_id}/report")

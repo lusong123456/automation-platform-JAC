@@ -11,18 +11,23 @@
     />
 
     <el-card shadow="never" class="block">
-      <div class="toolbar">
-        <div class="toolbar-left">
-          <span class="label">操作人</span>
-          <el-input
-            v-model="operator"
-            class="operator-input"
-            placeholder="请输入操作人姓名"
-            clearable
-          />
-          <el-button :loading="refreshing" @click="onRefresh">刷新清单</el-button>
+      <template #header>
+        <div class="card-header">
+          <span>用例清单</span>
+          <div class="header-right">
+            <span class="label">操作人</span>
+            <el-input
+              v-model="operator"
+              class="operator-input"
+              placeholder="留空默认当前登录用户"
+              clearable
+            />
+          </div>
         </div>
-        <span v-if="data" class="muted">清单收集时间：{{ data.collected_at }}</span>
+      </template>
+      <div class="meta">
+        <span>共 {{ total }} 条用例</span>
+        <span v-if="data" class="muted">清单收集时间：{{ formatLocalTime(data.collected_at) }}</span>
       </div>
     </el-card>
 
@@ -32,9 +37,16 @@
         description="暂无用例，请联系乙方维护用例代码"
       />
       <CaseGroup
-        v-for="module in modules"
-        :key="module.name"
-        :module="module"
+        v-if="flowModules.length"
+        title="IT流程功能测试"
+        :modules="flowModules"
+        v-model="selectedIds"
+      />
+      <CaseGroup
+        v-if="contractModules.length"
+        title="合同审核功能测试"
+        :modules="contractModules"
+        :show-module="false"
         v-model="selectedIds"
       />
     </div>
@@ -69,8 +81,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import CaseGroup from '../components/CaseGroup.vue'
 import RunProgress from '../components/RunProgress.vue'
-import { ApiError, createRun, getCases, refreshCases } from '../api'
+import { ApiError, createRun, getCases } from '../api'
 import { useRun } from '../composables/useRun'
+import { formatLocalTime } from '../utils/datetime'
 import type { CasesResponse, SubStepEvent } from '../types'
 
 const router = useRouter()
@@ -78,7 +91,6 @@ const { run, polling, error, start, subSteps, latestSubStep } = useRun()
 
 const data = ref<CasesResponse | null>(null)
 const loading = ref(false)
-const refreshing = ref(false)
 const submitting = ref(false)
 const selectedIds = ref<string[]>([])
 
@@ -89,6 +101,8 @@ watch(operator, (value) => {
 })
 
 const modules = computed(() => data.value?.modules ?? [])
+const flowModules = computed(() => modules.value.filter((m) => m.category !== 'contract'))
+const contractModules = computed(() => modules.value.filter((m) => m.category === 'contract'))
 const total = computed(() => data.value?.total ?? 0)
 const running = computed(() => polling.value)
 
@@ -109,20 +123,6 @@ async function load() {
 function pruneSelection() {
   const validIds = new Set(modules.value.flatMap((m) => m.cases.map((c) => c.id)))
   selectedIds.value = selectedIds.value.filter((id) => validIds.has(id))
-}
-
-/** 刷新清单（重新收集） */
-async function onRefresh() {
-  refreshing.value = true
-  try {
-    data.value = await refreshCases()
-    pruneSelection()
-    ElMessage.success('用例清单已刷新')
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    refreshing.value = false
-  }
 }
 
 /** 触发执行 */
@@ -182,22 +182,32 @@ onMounted(load)
   font-size: 13px;
 }
 
-.toolbar {
+.card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
-.toolbar-left {
+.header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: #606266;
 }
 
 .label {
   color: #606266;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .operator-input {
